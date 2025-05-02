@@ -8,41 +8,40 @@ public class BallSyn : MonoBehaviourPun, IPunObservable
     Vector3 networkPos;
     Vector3 networkVel;
     
-    // 부드러운 보간을 위한 변수
-    Vector3 targetPos;
-    Vector3 targetVel;
-    Vector3 currentVel;
-    float smoothTime = 0.1f; // 부드러운 움직임을 위한 초기값
-    
-    // 지연 관련 변수
-    float lastLag = 0;
+    // 부드러운 동기화를 위한 변수
+    float syncTime = 0.1f; // 더 짧은 고정값 사용
+    private float syncDelay = 0; // 마지막 데이터 수신 후 경과 시간
     
     Rigidbody rb;
 
     void Awake()
     {
         rb = GetComponent<Rigidbody>();
-        networkPos = transform.position;
-        targetPos = transform.position;
+        networkPos = rb.position;
         networkVel = Vector3.zero;
-        targetVel = Vector3.zero;
     }
 
     void FixedUpdate()
     {
         if (!photonView.IsMine)
         {
-            // 네트워크 지연에 따라 보간 시간 동적 조정
-            smoothTime = Mathf.Clamp(lastLag * 0.5f, 0.05f, 0.15f);
+            // 수신 후 경과 시간 업데이트
+            syncDelay += Time.fixedDeltaTime;
             
-            // SmoothDamp를 사용한 부드러운 보간
-            Vector3 nextPos = Vector3.SmoothDamp(rb.position, targetPos, ref currentVel, smoothTime);
-            rb.MovePosition(nextPos);
+            // 거리에 따른 보간 계수 계산 (멀수록 빠르게, 가까우면 천천히)
+            float distance = Vector3.Distance(rb.position, networkPos);
+            float t = Time.fixedDeltaTime * (5f + distance * 2f); // 거리에 따라 보간 속도 조정
+            t = Mathf.Clamp01(t); // 0~1 사이 값으로 제한
             
-            // 속도 적용 (선택적)
-            if (targetVel.magnitude > 0.1f)
+            // 위치 보간
+            Vector3 targetPos = networkPos + (networkVel * syncDelay * 0.5f); // 지연 보정 50%만 적용
+            Vector3 newPos = Vector3.Lerp(rb.position, targetPos, t);
+            rb.MovePosition(newPos);
+            
+            // 속도 부분 적용 (완전히 덮어쓰지 않음)
+            if (networkVel.magnitude > 0.1f)
             {
-                rb.velocity = Vector3.Lerp(rb.velocity, targetVel, Time.fixedDeltaTime * 10f);
+                rb.velocity = Vector3.Lerp(rb.velocity, networkVel, Time.fixedDeltaTime * 3f);
             }
         }
     }
@@ -51,25 +50,23 @@ public class BallSyn : MonoBehaviourPun, IPunObservable
     {
         if (stream.IsWriting)
         {
-            // 소유자는 위치와 속도 정보를 전송
-            stream.SendNext(transform.position);
+            stream.SendNext(rb.position);
             stream.SendNext(rb.velocity);
         }
         else
         {
-            // 수신된 위치와 속도 업데이트
             networkPos = (Vector3)stream.ReceiveNext();
             networkVel = (Vector3)stream.ReceiveNext();
-
-            // 지연 계산 및 위치 예측
-            lastLag = Mathf.Abs((float)(PhotonNetwork.Time - info.SentServerTime));
-            targetPos = networkPos + networkVel * lastLag;
-            targetVel = networkVel;
             
-            // 처음 받았을 때는 즉시 적용하여 큰 점프 방지
-            if (currentVel.magnitude < 0.1f)
+            // 수신 시 경과 시간 초기화
+            syncDelay = 0f;
+            
+            // 위치 차이가 너무 클 경우에만 순간이동 (텔레포트 임계값)
+            float positionDifference = Vector3.Distance(rb.position, networkPos);
+            if (positionDifference > 5f) // 5유닛 이상 차이날 경우
             {
-                rb.position = targetPos;
+                rb.position = networkPos;
+                rb.velocity = networkVel;
             }
         }
     }
